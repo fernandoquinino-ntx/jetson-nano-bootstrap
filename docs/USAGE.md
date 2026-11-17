@@ -1,5 +1,12 @@
 # Usage guide
 
+> **Recommended:** use the graphical wizard (`Jetson Flasher.app` from the DMG, or `JetsonFlasher-windows-x64.exe`).
+> It walks you through the same steps as the terminal menus described below: choose the board, choose the task,
+> get the image, pick the disk (you must type its id to confirm), write + verify, follow the on-screen next steps.
+> The macOS app asks for your admin password through the standard macOS dialog and writes the disk with a
+> small privileged helper (the same executable, started as `--worker-flash`); the Cancel button stops it.
+> The terminal menus below remain available via `jetson_flasher.py`.
+
 ## Requirements
 
 - **Mac** (for flashing) with Python 3.9+ *or* the prebuilt binary; `diskutil`, `dd`, `ssh`, `scp` (all built in).
@@ -7,7 +14,7 @@
 - Internet access for the ~20 GB download (resumable) and, later, the Jetson's apt/SSH steps.
 - Your Mac admin password (`sudo`) to write to the raw disk.
 
-Run: `python3 jetson_flasher.py` or `./jetson-flasher-macos-arm64`. Check version: `--version`.
+Run: `python3 jetson_flasher.py` or `./jetson-flasher-macos-arm64` (or `-x64`). Check version: `--version`.
 
 ## First screen: choose the board
 
@@ -23,6 +30,7 @@ Run: `python3 jetson_flasher.py` or `./jetson-flasher-macos-arm64`. Check versio
 | **4 Flash JetPack** | Download/choose file → pick disk → confirm → write → optional verify → eject. See below. |
 | **5 Change board** | Switch Orin Nano / Nano. |
 | **6 Firmware bridge** | Orin only. Prepares a JetPack 5.1.3 microSD to upgrade old firmware. |
+| **8 NVMe not detected?** | Orin only. Explains causes and runs NVMe diagnostics + firmware update over SSH (or prepares the bridge microSD). |
 | **7 Post-boot tuning** | SSH into the booted Jetson to update firmware and optimise it for AI. |
 
 ### Menu 4 – flashing (Orin Nano)
@@ -57,6 +65,7 @@ over `ssh -t`. Pick steps by number (Enter = the starred defaults):
 
 | # | Step | Effect |
 |---|---|---|
+| 0* | NVMe diagnostics | `lspci`, `lsblk`, `nvme list`, kernel log, driver state, firmware hints |
 | 1* | Info | Model, L4T, kernel, boot device, disk/RAM/swap, power mode, firmware slots |
 | 2* | Firmware | L4T 35.x: installs QSPI updater (→ 36.x); 36+/39: upgrades the bootloader package |
 | 3* | Upgrade | `apt dist-upgrade`; JetPack 6 can retarget the apt repo (e.g. `36.5`) |
@@ -70,6 +79,19 @@ over `ssh -t`. Pick steps by number (Enter = the starred defaults):
 | 11 | Ollama | Local LLM server |
 
 (* = default.) A reboot reminder is printed when needed, and the tool offers to reboot the Jetson.
+
+## The installer does not see the NVMe
+
+You cannot add an NVMe "driver" to the USB stick/SD: support is built into NVIDIA's kernel. Work through:
+
+1. **Seating** – power off, unplug, re-seat the SSD in the M.2 **Key-M** slot (bottom of the carrier board) and screw it down.
+2. **Drive type** – must be PCIe NVMe (2230/2242/2280 per carrier); M.2 SATA does not work.
+3. **Firmware** – a new unit has old QSPI firmware. Run menu **8** (or **6**): boot the JetPack 5.1.3 microSD, run the
+   diagnostics + firmware step, power off completely, then retry the JetPack 7.2.x USB stick (needs firmware 36.x).
+4. **Other drive** – a few SSDs fail PCIe link training; try another.
+
+Menu 8 → SSH prints a report; if `lspci` shows no "Non-Volatile memory controller" it is hardware (1/2/4),
+otherwise firmware/software (3). On the Jetson itself you can run: `lspci; lsblk; sudo dmesg | grep -i nvme`.
 
 ## Windows
 
@@ -94,3 +116,29 @@ macOS-only; on Windows write the downloaded image with balenaEtcher or Rufus.
 
 NVIDIA publishes new images: edit the `CATALOG` dictionary at the top of `jetson_flasher.py`, bump `__version__`,
 add a CHANGELOG entry and tag a release.
+
+## macOS: "Operation not permitted" on /dev/rdiskN
+
+macOS privacy protection can block raw disk access even with the administrator password. Fix:
+
+1. *System Settings → Privacy & Security → **Full Disk Access*** → enable **Jetson Flasher**
+   (press **+** and pick it from Applications if it is not listed).
+2. Quit and reopen the app, then press **Try again** (or run the wizard again).
+3. Make sure no other app is using the disk (close Finder windows / Disk Utility for that disk).
+4. Still blocked? Use the terminal version: `sudo ./jetson-flasher-macos-arm64` from Terminal
+   (give Terminal Full Disk Access if needed).
+
+## Boot over the network (UEFI HTTP boot) – no USB stick
+
+Wizard → **Boot the JetPack 7.2.1 installer over the network (HTTP boot)**.
+
+1. Pick / download the installer ISO.
+2. Choose this computer's IP (the wizard suggests it) and a port, then **Start server**. Copy the **Boot URL**.
+3. Jetson (Ethernet cable on the same network): press **Esc** at the NVIDIA logo → *Device Manager → Network Device
+   List →* your NIC *→ HTTP Boot Configuration* → set **Boot URI** to the Boot URL → save.
+   (No DHCP on the network? set a static address under *IPv4 Network Configuration* first.)
+4. *Boot Manager → **UEFI HTTPv4 (MAC:…)***. The ISO is downloaded into RAM and the installer starts; the wizard
+   shows the progress. Keep the wizard open until the download finishes.
+
+Notes: needs firmware 36.x; the whole ISO is loaded into RAM (8 GB module recommended); keep file names free of
+spaces; allow the firewall prompt. Equivalent by hand: `cd ~/JetsonImages && python3 -m http.server 8000`.

@@ -33,14 +33,18 @@ IMPORTANT
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import plistlib
 import random
 import re
 import shutil
+import socket
 import subprocess
 import sys
+import tempfile
 import time
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -48,7 +52,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-__version__ = "1.1.0"
+__version__ = "2.1.0"
 
 # --------------------------------------------------------------------------
 # Catalog of official images. Edit here if NVIDIA publishes a new image.
@@ -64,7 +68,7 @@ CATALOG = {
             "l4t": "36.4.4",
             "url": "https://developer.nvidia.com/downloads/embedded/L4T/r36_Release_v4.4/jp62-r1-orin-nano-sd-card-image.zip",
             "note": "Latest SD-card image. Newer 6.2.x releases (e.g. 6.2.3 / L4T 36.5.x) "
-                    "are installed on top of it with an APT upgrade (menu option 7).",
+                    "are installed on top of it with an APT upgrade (SSH tuning step).",
         },
         "iso": {
             "jetpack": "7.2.1",
@@ -107,7 +111,7 @@ UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X) jetson-flasher/1.0"
 # Small terminal UI helpers
 # --------------------------------------------------------------------------
 
-USE_COLOR = sys.stdout.isatty()
+USE_COLOR = bool(sys.stdout and sys.stdout.isatty())
 if USE_COLOR and sys.platform == "win32":
     os.system("")  # enables ANSI escape processing in the Windows console
 
@@ -390,7 +394,8 @@ def check_latest(board: str):
 # Download
 # --------------------------------------------------------------------------
 
-def download(url: str, dest_dir: Path = CACHE_DIR) -> Path | None:
+def download(url: str, dest_dir: Path = CACHE_DIR, on_progress=None) -> Path | None:
+    """on_progress(done, total) replaces the terminal bar (used by the GUI)."""
     dest_dir.mkdir(parents=True, exist_ok=True)
     # Resolve redirects to learn the real filename and size
     try:
@@ -423,13 +428,19 @@ def download(url: str, dest_dir: Path = CACHE_DIR) -> Path | None:
                 have = 0
             mode = "ab" if have else "wb"
             length = int(r.headers.get("Content-Length") or 0)
-            prog = Progress(have + length if length else total, "Download")
+            grand = have + length if length else total
+            prog = Progress(grand, "Download")
             prog.done = have
             with open(part, mode) as f:
                 while chunk := r.read(1 << 20):
                     f.write(chunk)
-                    prog.update(len(chunk))
-            prog.finish()
+                    if on_progress:
+                        prog.done += len(chunk)
+                        on_progress(prog.done, grand)
+                    else:
+                        prog.update(len(chunk))
+            if not on_progress:
+                prog.finish()
     except (urllib.error.URLError, OSError) as e:
         err(f"Download failed: {e}. Run again to resume.")
         return None
@@ -604,6 +615,31 @@ do_info(){
   fi
 }
 
+do_nvme(){
+  step "NVMe diagnostics"
+  apt-get install -y pciutils nvme-cli >/dev/null 2>&1 || wrn "Could not install pciutils/nvme-cli (no network?)"
+  modprobe nvme 2>/dev/null || true
+  echo "-- PCIe devices (the NVMe must appear as 'Non-Volatile memory controller'):"
+  lspci 2>/dev/null || echo "   lspci unavailable"
+  echo "-- Block devices:"; lsblk -o NAME,SIZE,TYPE,MODEL,MOUNTPOINT 2>/dev/null
+  echo "-- nvme list:"; nvme list 2>/dev/null || true
+  echo "-- Kernel messages (nvme/pcie):"
+  dmesg 2>/dev/null | grep -i -E "nvme|pcie.*(link|fail|timeout)|tegra194-pcie" | tail -n 25
+  echo "-- nvme driver: $(lsmod | grep -c '^nvme') module(s) loaded; kernel config: $(zcat /proc/config.gz 2>/dev/null | grep 'CONFIG_BLK_DEV_NVME=' || echo 'n/a')"
+  FW=$(nvbootctrl dump-slots-info 2>/dev/null | awk -F': ' '/Current version/{print $2}')
+  echo "-- Firmware: ${FW:-unknown}   L4T: ${L4T:-unknown}"
+  if ls /dev/nvme0n1 >/dev/null 2>&1; then
+    okk "NVMe detected: /dev/nvme0n1. The kernel driver is fine."
+    [[ "${FW:-0}" =~ ^3[0-5]\. ]] && wrn "Firmware ${FW} is older than 36.x: update it (--firmware) or JetPack 6/7 installers will not boot."
+  else
+    wrn "No NVMe device. The driver is built into the Jetson kernel, so this is almost always:"
+    echo "   1. SSD not fully seated / screw missing in the M.2 Key-M slot (bottom of the carrier board)"
+    echo "   2. SSD is SATA M.2 (B-key) - only PCIe NVMe works"
+    echo "   3. Old QSPI firmware - run the firmware step (--firmware), power off completely, retry"
+    echo "   4. Try another NVMe (some drives with power-saving/PCIe Gen4 quirks fail to link)"
+  fi
+}
+
 do_firmware(){
   step "Firmware / QSPI bootloader"
   FW=$(nvbootctrl dump-slots-info 2>/dev/null | awk -F': ' '/Current version/{print $2}')
@@ -746,6 +782,7 @@ for a in "$@"; do
   case $a in
     --info) do_info ;;
     --firmware) do_firmware ;;
+    --nvme) do_nvme ;;
     --upgrade) do_upgrade ;;
     --jetpack) do_jetpack ;;
     --resize) do_resize ;;
@@ -764,6 +801,7 @@ if [[ $REBOOT_NEEDED == 1 ]]; then wrn "A reboot is required: sudo reboot"; fi
 
 REMOTE_STEPS = [
     ("--info",     "Show system / firmware info", True),
+    ("--nvme",     "NVMe diagnostics (is the SSD seen? driver, PCIe, firmware hints)", True),
     ("--firmware", "Update firmware / QSPI bootloader", True),
     ("--upgrade",  "APT full upgrade (JetPack 6 only: optionally move repo to 36.5 = JetPack 6.2.3)", True),
     ("--jetpack",  "Install full JetPack SDK (CUDA, cuDNN, TensorRT) + CUDA PATH", True),
@@ -777,7 +815,27 @@ REMOTE_STEPS = [
 ]
 
 
-def remote_menu():
+def flow_nvme_help():
+    header("NVMe not detected by the Jetson / installer")
+    print("  The NVMe driver is already inside NVIDIA's Linux kernel - there is nothing to install on the")
+    print("  USB stick. When the installer lists no NVMe the cause is one of:")
+    print("   1. SSD not seated / not screwed down in the M.2 Key-M slot under the carrier board.")
+    print("   2. SSD is not PCIe NVMe (M.2 SATA drives are not supported).")
+    print("   3. Firmware (QSPI) older than 36.x - the usual cause on a new Orin Nano.")
+    print("   4. A drive that fails PCIe link training - try a different NVMe.")
+    print()
+    print("  Safe order of attack:")
+    print("   a) Power off, re-seat the SSD, boot the installer again.")
+    print("   b) Still missing? Make the JetPack 5.1.3 microSD (menu 6), boot it, run this menu's SSH")
+    print("      diagnostics (it also updates firmware to 36.x), then retry the JetPack 7.2.x USB stick.")
+    print()
+    if yes("Run NVMe diagnostics + firmware update on a booted Jetson over SSH now?"):
+        remote_menu(preset=["--info", "--nvme", "--firmware"])
+    elif yes("Prepare the JetPack 5.1.3 firmware-bridge microSD now?"):
+        flow_bridge()
+
+
+def remote_menu(preset=None):
     header("Firmware update & AI tuning on the Jetson (via SSH)")
     print("  The Jetson must be booted, on your network, with SSH enabled")
     print("  (finish the first-boot setup on a monitor, or over the USB-C port: 192.168.55.1).")
@@ -788,8 +846,10 @@ def remote_menu():
     print("\n  Select steps (enter numbers separated by spaces, Enter = defaults marked *):")
     for i, (_, label, default) in enumerate(REMOTE_STEPS, 1):
         print(f"   {'*' if default else ' '} {i:2}) {label}")
-    sel = ask("Steps").split()
-    if sel:
+    sel = [] if preset else ask("Steps").split()
+    if preset:
+        chosen = preset
+    elif sel:
         chosen = [REMOTE_STEPS[int(s) - 1][0] for s in sel if s.isdigit() and 1 <= int(s) <= len(REMOTE_STEPS)]
     else:
         chosen = [flag for flag, _, d in REMOTE_STEPS if d]
@@ -818,6 +878,319 @@ def remote_menu():
     run(["ssh", "-t", target, cmd], check=False, capture=False)
     if yes("Reboot the Jetson now?"):
         run(["ssh", "-t", target, "sudo reboot"], check=False, capture=False)
+
+
+# --------------------------------------------------------------------------
+# HTTP boot server (Jetson UEFI "HTTPv4" boot): serves ONE file over HTTP
+# --------------------------------------------------------------------------
+
+def lan_ips() -> list:
+    """IPv4 addresses of this computer, the one used for the default route first."""
+    ips = []
+    try:
+        sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sk.connect(("10.255.255.255", 1))          # no packet is sent
+        ips.append(sk.getsockname()[0])
+        sk.close()
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ips.append(info[4][0])
+    except OSError:
+        pass
+    out = []
+    for ip in ips:
+        if ip not in out and not ip.startswith("127."):
+            out.append(ip)
+    return out or ["127.0.0.1"]
+
+
+class SingleFileServer:
+    """Tiny HTTP server (GET/HEAD/Range) that exposes only `path`, for UEFI HTTP boot."""
+
+    def __init__(self, path, port: int = 8000, on_event=None):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        self.path = Path(path)
+        self.name = self.path.name
+        self.size = self.path.stat().st_size
+        emit = on_event or (lambda *a, **k: None)
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):  # silence default logging
+                pass
+
+            def _ok_path(self):
+                return urllib.parse.unquote(self.path.split("?")[0]) == "/" + outer.name
+
+            def _range(self):
+                rng = self.headers.get("Range")
+                if rng and rng.startswith("bytes="):
+                    a, _, b = rng[6:].partition("-")
+                    try:
+                        start = int(a) if a else outer.size - int(b)
+                        end = int(b) if (a and b) else outer.size - 1
+                        return max(start, 0), min(end, outer.size - 1), True
+                    except ValueError:
+                        pass
+                return 0, outer.size - 1, False
+
+            def _head(self, send_body: bool):
+                if not self._ok_path():
+                    self.send_response(404)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    emit("miss", self.client_address[0], self.path)
+                    return
+                start, end, partial = self._range()
+                length = end - start + 1
+                self.send_response(206 if partial else 200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Length", str(length))
+                if partial:
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{outer.size}")
+                self.end_headers()
+                if not send_body:
+                    emit("head", self.client_address[0], outer.name)
+                    return
+                sent, last = 0, 0.0
+                try:
+                    with open(outer.path, "rb") as fh:
+                        fh.seek(start)
+                        while sent < length:
+                            data = fh.read(min(1 << 20, length - sent))
+                            if not data:
+                                break
+                            self.wfile.write(data)
+                            sent += len(data)
+                            if time.time() - last > 0.3:
+                                last = time.time()
+                                emit("progress", self.client_address[0], start + sent, outer.size)
+                    emit("done" if sent == length else "aborted", self.client_address[0], start + sent, outer.size)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    emit("aborted", self.client_address[0], start + sent, outer.size)
+
+            def do_HEAD(self):
+                self._head(False)
+
+            def do_GET(self):
+                self._head(True)
+
+        self.httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+        self.httpd.daemon_threads = True
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+
+    def url(self, ip: str) -> str:
+        return f"http://{ip}:{self.port}/{urllib.parse.quote(self.name)}"
+
+    def start(self):
+        self.thread.start()
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+# --------------------------------------------------------------------------
+# Privileged flash worker (used by the GUI; runs as root via the OS admin prompt)
+# --------------------------------------------------------------------------
+
+def _status(path: str, **kw):
+    with open(path, "a") as f:
+        f.write(json.dumps(kw) + "\n")
+
+
+class _RawWriter:
+    """Raw-disk writer. If macOS refuses open() (EPERM), fall back to Apple's /bin/dd."""
+
+    def __init__(self, path: str):
+        self.proc, self.f = None, None
+        try:
+            self.f = open(path, "wb", buffering=0)
+        except PermissionError:
+            self.proc = subprocess.Popen(["/bin/dd", f"of={path}", "bs=4m"],
+                                         stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def _fail(self):
+        err = self.proc.stderr.read().decode(errors="ignore").strip() if self.proc.stderr else ""
+        self.proc.wait()
+        raise PermissionError(1, err or "Operation not permitted")
+
+    def write(self, mv):
+        if self.f:
+            while mv:
+                mv = mv[self.f.write(mv):]
+            return
+        try:
+            self.proc.stdin.write(bytes(mv))
+        except (BrokenPipeError, OSError):
+            self._fail()
+
+    def close(self):
+        if self.f:
+            try:
+                os.fsync(self.f.fileno())
+            except OSError:
+                pass
+            self.f.close()
+        else:
+            try:
+                self.proc.stdin.close()
+            except OSError:
+                pass
+            if self.proc.wait() != 0:
+                self._fail()
+
+
+class _RawReader:
+    def __init__(self, path: str, size: int, blk: int):
+        self.proc, self.f = None, None
+        try:
+            self.f = open(path, "rb", buffering=0)
+        except PermissionError:
+            count = (size + blk - 1) // blk
+            self.proc = subprocess.Popen(["/bin/dd", f"if={path}", "bs=4m", f"count={count}"],
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.f = self.proc.stdout
+
+    def read(self, n):
+        data = self.f.read(n)
+        if not data and self.proc:
+            err = self.proc.stderr.read().decode(errors="ignore")
+            if "not permitted" in err:
+                raise PermissionError(1, err.strip())
+        return data
+
+    def close(self):
+        self.f.close()
+
+
+def worker_flash(image: str, ident: str, status: str, do_verify: bool) -> int:
+    """Write `image` to /dev/r<ident>, report JSON lines to `status`. Needs root."""
+    cancel = status + ".cancel"
+    try:
+        if sys.platform != "darwin" or os.geteuid() != 0:
+            raise RuntimeError("The flash worker must run as root on macOS.")
+        if not re.fullmatch(r"disk\d+", ident):
+            raise RuntimeError(f"Invalid disk id: {ident}")
+        allowed = {d.ident: d for d in list_external_disks()}
+        if ident not in allowed or ident in boot_disks():
+            raise RuntimeError(f"{ident} is not an external disk (refusing to write).")
+        disk = allowed[ident]
+        src, size = open_image_stream(Path(image))
+        if size > disk.size:
+            raise RuntimeError(f"Image ({human(size)}) is larger than the disk ({human(disk.size)}).")
+        run(["diskutil", "unmountDisk", "force", ident], check=False)
+        blk, sector = 4 << 20, 4096
+        h, done, last = hashlib.sha256(), 0, 0.0
+        dev = _RawWriter(disk.raw)
+        try:
+            while chunk := src.read(blk):
+                if os.path.exists(cancel):
+                    raise RuntimeError("Cancelled. The disk is left partially written.")
+                h.update(chunk)
+                done += len(chunk)
+                if len(chunk) % sector:
+                    chunk += b"\0" * (sector - len(chunk) % sector)
+                dev.write(memoryview(chunk))
+                if time.time() - last > 0.3:
+                    last = time.time()
+                    _status(status, phase="write", done=done, total=size)
+        finally:
+            dev.close()
+        src.close()
+        _status(status, phase="write", done=size, total=size)
+        if do_verify:
+            hv, got, last = hashlib.sha256(), 0, 0.0
+            dev = _RawReader(disk.raw, size, blk)
+            try:
+                while got < size:
+                    if os.path.exists(cancel):
+                        raise RuntimeError("Verification cancelled.")
+                    want = min(blk, size - got)
+                    data = dev.read(((want + sector - 1) // sector) * sector)[:want]
+                    if not data:
+                        break
+                    hv.update(data)
+                    got += len(data)
+                    if time.time() - last > 0.3:
+                        last = time.time()
+                        _status(status, phase="verify", done=got, total=size)
+            finally:
+                dev.close()
+            if hv.hexdigest() != h.hexdigest():
+                raise RuntimeError("Verification FAILED: the disk content differs from the image. "
+                                   "Try another cable / enclosure / USB port and flash again.")
+        run(["diskutil", "eject", ident], check=False)
+        _status(status, phase="done", sha256=h.hexdigest(), verified=do_verify)
+        return 0
+    except Exception as e:  # noqa: BLE001
+        _status(status, phase="error", msg=str(e),
+                code="eperm" if isinstance(e, PermissionError) else "")
+        return 1
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _ssh_env(password: str):
+    """Environment that lets ssh/scp read the password without a terminal (SSH_ASKPASS)."""
+    env, tmp = dict(os.environ), None
+    if password:
+        tmp = Path(tempfile.mkdtemp(prefix="jfask"))
+        if sys.platform == "win32":
+            ap = tmp / "askpass.bat"
+            ap.write_text("@echo off\r\necho %JF_PW%\r\n")
+        else:
+            ap = tmp / "askpass.sh"
+            ap.write_text('#!/bin/sh\nprintf "%s\\n" "$JF_PW"\n')
+            ap.chmod(0o700)
+        env.update(SSH_ASKPASS=str(ap), SSH_ASKPASS_REQUIRE="force",
+                   JF_PW=password, DISPLAY=env.get("DISPLAY", ":0"))
+    return env, tmp
+
+
+SSH_OPTS = ["-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15",
+            "-o", "NumberOfPasswordPrompts=1"]
+
+
+def run_remote(host: str, user: str, password: str, steps: list, extra_env: list,
+               log, reboot: bool = False) -> int:
+    """Copy jetson_postinstall.sh to the Jetson and run it with sudo, streaming output to log()."""
+    target = f"{user}@{host}"
+    env, tmp = _ssh_env(password)
+    try:
+        script = Path(tempfile.gettempdir()) / "jetson_postinstall.sh"
+        with open(script, "w", newline="\n") as fh:
+            fh.write(REMOTE_SCRIPT)
+        if not reboot:
+            log(f"Copying script to {target} ...")
+            r = subprocess.run(["scp", *SSH_OPTS, str(script), f"{target}:~/jetson_postinstall.sh"],
+                               env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+            if r.returncode != 0:
+                log("scp failed: " + (r.stderr or r.stdout).strip())
+                return r.returncode
+            remote = ("sudo -S -p '' env " + " ".join(extra_env) +
+                      " bash ~/jetson_postinstall.sh " + " ".join(steps))
+        else:
+            remote = "sudo -S -p '' reboot"
+        log(f"Running on the Jetson: {' '.join(steps) if not reboot else 'reboot'}")
+        pr = subprocess.Popen(["ssh", *SSH_OPTS, target, remote], env=env,
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True, bufsize=1)
+        pr.stdin.write(password + "\n")
+        pr.stdin.close()
+        for line in pr.stdout:
+            log(ANSI_RE.sub("", line.rstrip("\n")))
+        return pr.wait()
+    finally:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------
@@ -858,6 +1231,7 @@ def flow_flash(board: str):
             print("  3. Press Esc at the NVIDIA logo → Boot Manager → choose the USB stick.")
             print("  4. In the installer, pick the NVMe as the target. Remove the stick after it finishes.")
             print("  5. Then use menu 7 to tune for AI.")
+            print("  No NVMe in the installer? -> menu 8 (diagnose + firmware).")
         return
 
     image = choose_image(board)
@@ -872,7 +1246,7 @@ def flow_flash(board: str):
             print("  1. Install the NVMe in the M.2 Key-M slot on the bottom of the carrier board")
             print("     (remove the microSD card so the Jetson boots from NVMe).")
         print("  2. Power on with monitor+keyboard, finish the Ubuntu first-boot setup.")
-        print("  3. If you land in a UEFI shell / black screen, the firmware is too old:")
+        print("  3. NVMe not seen or UEFI shell / black screen? Firmware is too old (menu 8 / 6):")
         print("     use menu option 6 (firmware bridge).")
         print("  4. Then use menu option 7 to update firmware and tune for AI.")
 
@@ -910,6 +1284,8 @@ def main():
     if "--version" in sys.argv[1:]:
         print(f"jetson-flasher {__version__}")
         return
+    if len(sys.argv) >= 6 and sys.argv[1] == "--worker-flash":
+        sys.exit(worker_flash(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5] == "1"))
     needed = ("diskutil", "dd", "ssh", "scp") if sys.platform == "darwin" else ("ssh", "scp")
     if sys.platform != "darwin":
         warn("Not running on macOS: disk flashing is disabled; download and SSH tuning still work.")
@@ -934,6 +1310,7 @@ def main():
         print("  5) Change board")
         if board == "orin":
             print("  6) Firmware bridge: prepare JetPack 5.1.3 microSD (old firmware)")
+            print("  8) NVMe not detected? Diagnose + firmware fix")
         print("  7) Jetson is booted → update firmware & tune for AI (SSH)")
         print("  q) Quit")
         sel = ask("Choice")
@@ -952,6 +1329,8 @@ def main():
                 flow_bridge()
             elif sel == "7":
                 remote_menu()
+            elif sel == "8" and board == "orin":
+                flow_nvme_help()
             elif sel.lower() in ("q", "quit", "exit"):
                 break
         except subprocess.CalledProcessError as e:

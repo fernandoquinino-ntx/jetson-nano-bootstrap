@@ -1,0 +1,140 @@
+# Builds the Jetson Flasher apps with PyInstaller.
+#   macOS   : JetsonFlasher-macos-<arch>.dmg   (drag-to-Applications installer with the GUI wizard .app)
+#             jetson-flasher-macos-<arch>      (terminal version)
+#   Windows : JetsonFlasher-windows-x64.exe    (GUI wizard)
+#             jetson-flasher-windows-x64.exe   (terminal version)
+#   push / PR -> lint + build + smoke tests; files kept as artifacts
+#   tag vX.Y.Z, or "Run workflow" with release=true -> GitHub Release with all files + SHA-256
+name: build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*.*.*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Create a GitHub Release (tag vX.Y.Z from jetson_flasher.py __version__)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python -m py_compile jetson_flasher.py jetson_flasher_gui.py
+      - name: Version check
+        run: |
+          V=$(python jetson_flasher.py --version | awk '{print $2}')
+          echo "script version: $V"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            [ "v$V" = "$GITHUB_REF_NAME" ] || { echo "Tag $GITHUB_REF_NAME != v$V"; exit 1; }
+          fi
+
+  build:
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-26,       id: macos-arm64 }
+          - { os: macos-15-intel, id: macos-x64 }
+          - { os: windows-latest, id: windows-x64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python -m pip install --upgrade pip pyinstaller
+      - name: Check Tk is available
+        run: python -c "import tkinter; print('Tk', tkinter.TkVersion)"
+
+      # ---------------- macOS ----------------
+      - name: Build terminal binary (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          python -m PyInstaller --onefile --name jetson-flasher-${{ matrix.id }} jetson_flasher.py
+          ./dist/jetson-flasher-${{ matrix.id }} --version
+      - name: Build GUI .app (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          python -m PyInstaller --windowed --noconfirm --name "Jetson Flasher" \
+            --osx-bundle-identifier com.fernandoquinino.jetsonflasher jetson_flasher_gui.py
+          codesign --force --deep --sign - "dist/Jetson Flasher.app"
+          codesign --verify --deep --verbose=2 "dist/Jetson Flasher.app"
+          "dist/Jetson Flasher.app/Contents/MacOS/Jetson Flasher" --selftest "$RUNNER_TEMP/selftest.txt"
+          cat "$RUNNER_TEMP/selftest.txt"
+      - name: Create DMG (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p stage out
+          cp -R "dist/Jetson Flasher.app" stage/
+          ln -s /Applications stage/Applications
+          hdiutil create -volname "Jetson Flasher" -srcfolder stage -ov -format UDZO "out/JetsonFlasher-${{ matrix.id }}.dmg"
+          hdiutil verify "out/JetsonFlasher-${{ matrix.id }}.dmg"
+          # mount it and check the app is inside
+          hdiutil attach "out/JetsonFlasher-${{ matrix.id }}.dmg" -mountpoint /tmp/jfdmg -nobrowse -quiet
+          ls /tmp/jfdmg && test -d "/tmp/jfdmg/Jetson Flasher.app"
+          hdiutil detach /tmp/jfdmg -quiet
+          cp dist/jetson-flasher-${{ matrix.id }} out/
+
+      # ---------------- Windows ----------------
+      - name: Build binaries (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m PyInstaller --onefile --name jetson-flasher-windows-x64 jetson_flasher.py
+          python -m PyInstaller --onefile --windowed --name JetsonFlasher-windows-x64 jetson_flasher_gui.py
+          ./dist/jetson-flasher-windows-x64.exe --version
+          $p = Start-Process -FilePath ./dist/JetsonFlasher-windows-x64.exe -ArgumentList "--selftest","$env:RUNNER_TEMP\selftest.txt" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "GUI selftest exit code $($p.ExitCode)" }
+          Get-Content "$env:RUNNER_TEMP\selftest.txt"
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item dist/jetson-flasher-windows-x64.exe, dist/JetsonFlasher-windows-x64.exe out/
+
+      - name: Checksums
+        shell: python
+        run: |
+          import hashlib, pathlib
+          for f in sorted(pathlib.Path("out").iterdir()):
+              if f.suffix == ".sha256": continue
+              d = hashlib.sha256(f.read_bytes()).hexdigest()
+              (f.parent / (f.name + ".sha256")).write_text(f"{d}  {f.name}\n")
+              print(d, f.name)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.id }}
+          path: out/*
+          retention-days: 30
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            TAG="v$(sed -n 's/^__version__ = "\(.*\)"/\1/p' jetson_flasher.py)"
+          fi
+          echo "Releasing $TAG at $GITHUB_SHA"; ls -l dist
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Jetson Flasher $TAG" \
+            --notes "Download the .dmg (macOS) or JetsonFlasher-windows-x64.exe (Windows) for the graphical wizard. See CHANGELOG.md. Apps are unsigned: see the README (Gatekeeper / SmartScreen)."

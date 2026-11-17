@@ -1,29 +1,63 @@
 # Jetson Bootstrap – NVMe flasher & AI tuner
 
-An interactive, dependency-free (Python standard library only) tool that takes a **NVIDIA Jetson Orin Nano**
-(or original Jetson Nano) from "box" to "ready for AI" using nothing but your Mac:
+A **graphical step-by-step wizard** (macOS and Windows) that takes a **NVIDIA Jetson Orin Nano**
+(or original Jetson Nano) from "box" to "ready for AI":
 
-1. finds the external disk (NVMe in a USB enclosure, SD card, USB stick),
-2. downloads the official JetPack image (resumable, cached in `~/JetsonImages`),
-3. streams it to the disk – no 20 GB extraction – and verifies the write,
-4. prepares a **firmware bridge** microSD (JetPack 5.1.3) for units with old QSPI firmware,
+1. downloads the official JetPack image (resumable, cached in `~/JetsonImages`),
+2. writes it to your NVMe / microSD / USB disk and verifies the write (macOS),
+3. prepares a **firmware bridge** microSD (JetPack 5.1.3) for units with old QSPI firmware,
+4. diagnoses an NVMe that is not detected,
 5. once the Jetson is booted, connects over **SSH** to update firmware and tune it for AI
    (CUDA/TensorRT, MAXN power mode, swap, Docker + NVIDIA runtime, jtop, jetson-containers, Ollama).
 
+A terminal (TUI) version is still included for power users.
+
 ## Download
 
-Binaries are built by GitLab CI/CD. Replace `<GROUP>/<PROJECT>` with this project's GitLab path.
+Direct links (always the newest release):
 
-| Platform | Latest build (default branch) | Tagged releases |
+| Platform | Graphical app | Checksum |
 |---|---|---|
-| macOS (Apple Silicon) – full features | [jetson-flasher-macos-arm64](https://gitlab.com/<GROUP>/<PROJECT>/-/jobs/artifacts/main/raw/dist/jetson-flasher-macos-arm64?job=build:macos) | [Releases](https://gitlab.com/<GROUP>/<PROJECT>/-/releases) |
-| Windows (x64) – download + SSH tuning only | [jetson-flasher-windows-x64.exe](https://gitlab.com/<GROUP>/<PROJECT>/-/jobs/artifacts/main/raw/dist/jetson-flasher-windows-x64.exe?job=build:windows) | [Releases](https://gitlab.com/<GROUP>/<PROJECT>/-/releases) |
+| **macOS Apple Silicon** (M1–M4) – installer **.dmg** | [JetsonFlasher-macos-arm64.dmg](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases/latest/download/JetsonFlasher-macos-arm64.dmg) | [SHA-256](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases/latest/download/JetsonFlasher-macos-arm64.dmg.sha256) |
+| **macOS Intel** – installer **.dmg** | [JetsonFlasher-macos-x64.dmg](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases/latest/download/JetsonFlasher-macos-x64.dmg) | [SHA-256](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases/latest/download/JetsonFlasher-macos-x64.dmg.sha256) |
+| **Windows x64** – wizard (download + SSH tuning) | [JetsonFlasher-windows-x64.exe](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases/latest/download/JetsonFlasher-windows-x64.exe) | [SHA-256](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases/latest/download/JetsonFlasher-windows-x64.exe.sha256) |
 
-Or run the script directly: `python3 jetson_flasher.py` (Python 3.9+, no pip packages).
+Terminal versions: [macOS arm64](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases/latest/download/jetson-flasher-macos-arm64) · [macOS Intel](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases/latest/download/jetson-flasher-macos-x64) · [Windows](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases/latest/download/jetson-flasher-windows-x64.exe).
 
-> **Unsigned binaries.** macOS: `chmod +x jetson-flasher-macos-arm64 && xattr -d com.apple.quarantine jetson-flasher-macos-arm64`
-> (or right-click → Open). Windows SmartScreen: *More info → Run anyway*.
-> Verify with the published `.sha256` file. Intel Macs: run the Python script instead.
+- All releases: <https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases>
+- CI builds (artifacts kept 30 days, GitHub login needed): <https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/actions/workflows/build.yml>
+
+### Install on macOS (DMG)
+
+1. Download the `.dmg` for your Mac and open it.
+2. Drag **Jetson Flasher** onto the **Applications** shortcut.
+3. Eject the disk image, open *Applications* → **Jetson Flasher**.
+   The app is not signed with an Apple Developer ID, so the first time: **right-click → Open → Open**
+   (or run `xattr -dr com.apple.quarantine "/Applications/Jetson Flasher.app"`).
+4. When writing a disk, macOS shows its normal administrator-password dialog.
+
+### Install on Windows
+
+Run `JetsonFlasher-windows-x64.exe` (no installation needed). SmartScreen: *More info → Run anyway*.
+Disk writing is macOS-only; the Windows app downloads images and runs the SSH firmware / AI tuning
+(needs the built-in *OpenSSH Client* feature).
+
+### Run from source
+
+`python3 jetson_flasher_gui.py` (GUI, needs Python 3.9+ with Tk) or `python3 jetson_flasher.py` (terminal). No pip packages.
+
+## The wizard
+
+`Welcome (choose board)` → `What do you want to do?` → then one of:
+
+| Task | Pages |
+|---|---|
+| Install JetPack 6.2.1 on NVMe / microSD | Image → Disk (type id to confirm) → Write + verify → Next steps |
+| JetPack 7.2.1 installer USB stick | Image (ISO) → Disk → Write → Next steps |
+| **Boot over the network (HTTP boot)** | Image (ISO) → built-in web server + Boot URL + UEFI steps (no USB stick) |
+| Firmware bridge microSD (JetPack 5.1.3) | Image → Disk → Write → Next steps |
+| My NVMe is not detected | Causes + one-click diagnostics (SSH) or bridge microSD |
+| Jetson is running → firmware & AI tuning | SSH details + steps → live log, optional reboot |
 
 ## What it is for
 
@@ -52,6 +86,7 @@ Full walkthrough, every menu option, troubleshooting and safety notes: **[docs/U
 
 | Feature | macOS | Windows | Linux (script) |
 |---|---|---|---|
+| GUI wizard | ✔ (.dmg) | ✔ (.exe) | `python3 jetson_flasher_gui.py` |
 | Check versions, download images | ✔ | ✔ | ✔ |
 | List disks / flash / verify | ✔ | ✘ (use balenaEtcher) | ✘ |
 | SSH firmware update & AI tuning | ✔ | ✔ (needs OpenSSH client) | ✔ |
@@ -63,11 +98,14 @@ partitions before writing, and requires you to type the disk id. Still, double-c
 
 ## CI/CD
 
-`.gitlab-ci.yml` stages: `lint` → `build` (macOS arm64 + Windows x64, PyInstaller `--onefile`) → `release`
-(on tag `vX.Y.Z`: uploads to the Package Registry and creates a Release). To release: bump `__version__` in
-`jetson_flasher.py`, update `CHANGELOG.md`, then `git tag vX.Y.Z && git push --tags`. The tag must match
-`__version__` or the lint job fails. Jobs use GitLab.com SaaS runner tags (`saas-macos-medium-m1`,
-`saas-windows-medium-amd64`); on self-managed GitLab, substitute your own runner tags.
+`.github/workflows/build.yml`: `lint` → `build` → `release`.
+- macOS (arm64 + Intel): PyInstaller `.app` → ad-hoc codesign → **DMG** with an *Applications* shortcut; the DMG is
+  verified and mounted in CI, and the app is started in a self-test.
+- Windows: windowed GUI `.exe` (self-tested) + terminal `.exe`.
+- Every file gets a SHA-256. On tag `vX.Y.Z` (or *Actions → build → Run workflow*) a GitHub Release is created.
+
+To release: bump `__version__` in `jetson_flasher.py`, update `CHANGELOG.md`, run the workflow with *release* on
+(or `git tag vX.Y.Z && git push --tags`).
 
 ## Changelog
 
