@@ -7,7 +7,7 @@
 - Internet access for the ~20 GB download (resumable) and, later, the Jetson's apt/SSH steps.
 - Your Mac admin password (`sudo`) to write to the raw disk.
 
-Run: `python3 jetson_flasher.py` or `./jetson-flasher-macos-arm64`. Check version: `--version`.
+Run: `python3 jetson_flasher.py` or `./jetson-flasher-macos-arm64` (or `-x64``. Check version: `--version`.
 
 ## First screen: choose the board
 

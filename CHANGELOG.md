@@ -6,9 +6,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versio
 ## [1.1.0] - 2026-11-17
 
 ### Added
-- GitLab CI/CD pipeline (`.gitlab-ci.yml`) building standalone binaries with PyInstaller:
-  macOS (Apple Silicon) and Windows (x64). Tagged releases publish them to the Package Registry
-  and create a GitLab Release.
+- GitHub Actions workflow (`.github/workflows/build.yml`) building standalone binaries with PyInstaller:
+  macOS (Apple Silicon and Intel) and Windows (x64), with smoke test and SHA-256 files.
+  Tagged releases publish them to a GitHub Release.
 - `--version` flag.
 - Full documentation: `README.md` and `docs/USAGE.md`.
 - Windows support for the non-disk features (check versions, download image, SSH firmware/AI tuning).

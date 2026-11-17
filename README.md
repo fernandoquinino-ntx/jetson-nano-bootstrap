@@ -12,18 +12,20 @@ An interactive, dependency-free (Python standard library only) tool that takes a
 
 ## Download
 
-Binaries are built by GitLab CI/CD. Replace `<GROUP>/<PROJECT>` with this project's GitLab path.
+Binaries are built by GitHub Actions on every push ([workflow runs](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/actions/workflows/build.yml), artifacts kept 30 days) and attached to every tagged
+[Release](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases/latest).
 
-| Platform | Latest build (default branch) | Tagged releases |
-|---|---|---|
-| macOS (Apple Silicon) – full features | [jetson-flasher-macos-arm64](https://gitlab.com/<GROUP>/<PROJECT>/-/jobs/artifacts/main/raw/dist/jetson-flasher-macos-arm64?job=build:macos) | [Releases](https://gitlab.com/<GROUP>/<PROJECT>/-/releases) |
-| Windows (x64) – download + SSH tuning only | [jetson-flasher-windows-x64.exe](https://gitlab.com/<GROUP>/<PROJECT>/-/jobs/artifacts/main/raw/dist/jetson-flasher-windows-x64.exe?job=build:windows) | [Releases](https://gitlab.com/<GROUP>/<PROJECT>/-/releases) |
+| Platform | Download |
+|---|---|
+| macOS Apple Silicon – full features | `jetson-flasher-macos-arm64` from [Releases](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases/latest) |
+| macOS Intel – full features | `jetson-flasher-macos-x64` from [Releases](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases/latest) |
+| Windows x64 – download + SSH tuning only | `jetson-flasher-windows-x64.exe` from [Releases](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases/latest) |
 
 Or run the script directly: `python3 jetson_flasher.py` (Python 3.9+, no pip packages).
 
-> **Unsigned binaries.** macOS: `chmod +x jetson-flasher-macos-arm64 && xattr -d com.apple.quarantine jetson-flasher-macos-arm64`
+> **Unsigned binaries.** macOS: `chmod +x jetson-flasher-macos-* && xattr -d com.apple.quarantine jetson-flasher-macos-*`
 > (or right-click → Open). Windows SmartScreen: *More info → Run anyway*.
-> Verify with the published `.sha256` file. Intel Macs: run the Python script instead.
+> Verify with the published `.sha256` file.
 
 ## What it is for
 
@@ -63,11 +65,10 @@ partitions before writing, and requires you to type the disk id. Still, double-c
 
 ## CI/CD
 
-`.gitlab-ci.yml` stages: `lint` → `build` (macOS arm64 + Windows x64, PyInstaller `--onefile`) → `release`
-(on tag `vX.Y.Z`: uploads to the Package Registry and creates a Release). To release: bump `__version__` in
-`jetson_flasher.py`, update `CHANGELOG.md`, then `git tag vX.Y.Z && git push --tags`. The tag must match
-`__version__` or the lint job fails. Jobs use GitLab.com SaaS runner tags (`saas-macos-medium-m1`,
-`saas-windows-medium-amd64`); on self-managed GitLab, substitute your own runner tags.
+`.github/workflows/build.yml`: `lint` → `build` (PyInstaller `--onefile` on macOS arm64, macOS Intel and Windows;
+each binary is run with `--version` as a smoke test and gets a SHA-256 file) → `release` (on tag `vX.Y.Z`, creates a
+GitHub Release with all binaries). To release: bump `__version__` in `jetson_flasher.py`, update `CHANGELOG.md`, then
+`git tag vX.Y.Z && git push --tags`. The tag must match `__version__` or lint fails.
 
 ## Changelog
 

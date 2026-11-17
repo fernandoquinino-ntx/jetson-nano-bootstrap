@@ -1,0 +1,81 @@
+# Builds standalone binaries of jetson_flasher.py with PyInstaller.
+#   push / PR  -> lint + build macOS (arm64, Intel) and Windows; binaries kept as artifacts
+#   tag vX.Y.Z -> also creates a GitHub Release with the binaries + checksums
+name: build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*.*.*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python -m py_compile jetson_flasher.py
+      - name: Version check
+        run: |
+          V=$(python jetson_flasher.py --version | awk '{print $2}')
+          echo "script version: $V"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            [ "v$V" = "$GITHUB_REF_NAME" ] || { echo "Tag $GITHUB_REF_NAME != v$V"; exit 1; }
+          fi
+
+  build:
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14,       name: jetson-flasher-macos-arm64,  ext: "" }
+          - { os: macos-13,       name: jetson-flasher-macos-x64,    ext: "" }
+          - { os: windows-latest, name: jetson-flasher-windows-x64,  ext: ".exe" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python -m pip install --upgrade pip pyinstaller
+      - run: python -m PyInstaller --onefile --name ${{ matrix.name }} jetson_flasher.py
+      - name: Verify binary runs
+        shell: bash
+        run: |
+          out=$(./dist/${{ matrix.name }}${{ matrix.ext }} --version)
+          echo "$out"
+          [[ "$out" == jetson-flasher* ]]
+      - name: Checksum
+        shell: bash
+        run: |
+          cd dist
+          python -c "import hashlib,sys;n='${{ matrix.name }}${{ matrix.ext }}';print(hashlib.sha256(open(n,'rb').read()).hexdigest()+'  '+n)" > ${{ matrix.name }}.sha256
+          cat ${{ matrix.name }}.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/${{ matrix.name }}*
+          retention-days: 30
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --title "Jetson Flasher $GITHUB_REF_NAME" \
+            --notes "See CHANGELOG.md. Binaries are unsigned: see the README (Gatekeeper / SmartScreen)."
