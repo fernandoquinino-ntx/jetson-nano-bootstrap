@@ -1,5 +1,12 @@
 # Usage guide
 
+> **Recommended:** use the graphical wizard (`Jetson Flasher.app` from the DMG, or `JetsonFlasher-windows-x64.exe`).
+> It walks you through the same steps as the terminal menus described below: choose the board, choose the task,
+> get the image, pick the disk (you must type its id to confirm), write + verify, follow the on-screen next steps.
+> The macOS app asks for your admin password through the standard macOS dialog and writes the disk with a
+> small privileged helper (the same executable, started as `--worker-flash`); the Cancel button stops it.
+> The terminal menus below remain available via `jetson_flasher.py`.
+
 ## Requirements
 
 - **Mac** (for flashing) with Python 3.9+ *or* the prebuilt binary; `diskutil`, `dd`, `ssh`, `scp` (all built in).

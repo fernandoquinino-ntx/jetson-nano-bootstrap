@@ -3,6 +3,22 @@
 All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [2.0.0] - 2026-11-17
+
+### Added
+- **Graphical wizard** (`jetson_flasher_gui.py`, tkinter) for macOS and Windows: board → task → image → disk →
+  write/verify → next steps, plus SSH firmware/AI tuning with live log and reboot button, and the NVMe-not-detected helper.
+- **macOS installer DMG** (`JetsonFlasher-macos-arm64.dmg`, `-x64.dmg`): drag **Jetson Flasher.app** to Applications.
+- Windows GUI executable `JetsonFlasher-windows-x64.exe`.
+- Privileged flash worker (`--worker-flash`) launched through the macOS administrator-password dialog; writes the
+  image directly (no `dd`), supports cancel, and verifies by SHA-256 over the whole disk.
+- SSH steps run without a terminal (password via `SSH_ASKPASS`, `sudo -S`), output streamed to the GUI.
+- CI builds the apps, verifies/mounts the DMG, self-tests the GUI, adds checksums, and can publish a Release.
+
+### Changed
+- `download()` accepts a progress callback; stdout-less (windowed) execution is safe.
+- Terminal binaries are still published (`jetson-flasher-*`).
+
 ## [1.2.0] - 2026-11-17
 
 ### Added
