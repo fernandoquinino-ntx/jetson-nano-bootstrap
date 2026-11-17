@@ -39,10 +39,12 @@ import plistlib
 import random
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import time
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -50,7 +52,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-__version__ = "2.0.1"
+__version__ = "2.1.0"
 
 # --------------------------------------------------------------------------
 # Catalog of official images. Edit here if NVIDIA publishes a new image.
@@ -876,6 +878,122 @@ def remote_menu(preset=None):
     run(["ssh", "-t", target, cmd], check=False, capture=False)
     if yes("Reboot the Jetson now?"):
         run(["ssh", "-t", target, "sudo reboot"], check=False, capture=False)
+
+
+# --------------------------------------------------------------------------
+# HTTP boot server (Jetson UEFI "HTTPv4" boot): serves ONE file over HTTP
+# --------------------------------------------------------------------------
+
+def lan_ips() -> list:
+    """IPv4 addresses of this computer, the one used for the default route first."""
+    ips = []
+    try:
+        sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sk.connect(("10.255.255.255", 1))          # no packet is sent
+        ips.append(sk.getsockname()[0])
+        sk.close()
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ips.append(info[4][0])
+    except OSError:
+        pass
+    out = []
+    for ip in ips:
+        if ip not in out and not ip.startswith("127."):
+            out.append(ip)
+    return out or ["127.0.0.1"]
+
+
+class SingleFileServer:
+    """Tiny HTTP server (GET/HEAD/Range) that exposes only `path`, for UEFI HTTP boot."""
+
+    def __init__(self, path, port: int = 8000, on_event=None):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        self.path = Path(path)
+        self.name = self.path.name
+        self.size = self.path.stat().st_size
+        emit = on_event or (lambda *a, **k: None)
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):  # silence default logging
+                pass
+
+            def _ok_path(self):
+                return urllib.parse.unquote(self.path.split("?")[0]) == "/" + outer.name
+
+            def _range(self):
+                rng = self.headers.get("Range")
+                if rng and rng.startswith("bytes="):
+                    a, _, b = rng[6:].partition("-")
+                    try:
+                        start = int(a) if a else outer.size - int(b)
+                        end = int(b) if (a and b) else outer.size - 1
+                        return max(start, 0), min(end, outer.size - 1), True
+                    except ValueError:
+                        pass
+                return 0, outer.size - 1, False
+
+            def _head(self, send_body: bool):
+                if not self._ok_path():
+                    self.send_response(404)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    emit("miss", self.client_address[0], self.path)
+                    return
+                start, end, partial = self._range()
+                length = end - start + 1
+                self.send_response(206 if partial else 200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Length", str(length))
+                if partial:
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{outer.size}")
+                self.end_headers()
+                if not send_body:
+                    emit("head", self.client_address[0], outer.name)
+                    return
+                sent, last = 0, 0.0
+                try:
+                    with open(outer.path, "rb") as fh:
+                        fh.seek(start)
+                        while sent < length:
+                            data = fh.read(min(1 << 20, length - sent))
+                            if not data:
+                                break
+                            self.wfile.write(data)
+                            sent += len(data)
+                            if time.time() - last > 0.3:
+                                last = time.time()
+                                emit("progress", self.client_address[0], start + sent, outer.size)
+                    emit("done" if sent == length else "aborted", self.client_address[0], start + sent, outer.size)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    emit("aborted", self.client_address[0], start + sent, outer.size)
+
+            def do_HEAD(self):
+                self._head(False)
+
+            def do_GET(self):
+                self._head(True)
+
+        self.httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+        self.httpd.daemon_threads = True
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+
+    def url(self, ip: str) -> str:
+        return f"http://{ip}:{self.port}/{urllib.parse.quote(self.name)}"
+
+    def start(self):
+        self.thread.start()
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
 
 
 # --------------------------------------------------------------------------

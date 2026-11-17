@@ -3,6 +3,14 @@
 All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [2.1.0] - 2026-11-17
+
+### Added
+- **Boot over the network (HTTP boot)** task in the wizard (macOS and Windows): serves the JetPack installer ISO
+  from this computer so the Jetson can boot it with UEFI "HTTPv4" over Ethernet - no USB stick needed.
+  Shows the Boot URL (with copy button and IP picker), step-by-step UEFI instructions and live download progress.
+- Built-in single-file HTTP server (GET / HEAD / Range; serves only the chosen file; 404 for anything else).
+
 ## [2.0.1] - 2026-11-17
 
 ### Fixed

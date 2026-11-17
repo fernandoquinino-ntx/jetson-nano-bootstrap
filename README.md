@@ -54,6 +54,7 @@ Disk writing is macOS-only; the Windows app downloads images and runs the SSH fi
 |---|---|
 | Install JetPack 6.2.1 on NVMe / microSD | Image → Disk (type id to confirm) → Write + verify → Next steps |
 | JetPack 7.2.1 installer USB stick | Image (ISO) → Disk → Write → Next steps |
+| **Boot over the network (HTTP boot)** | Image (ISO) → built-in web server + Boot URL + UEFI steps (no USB stick) |
 | Firmware bridge microSD (JetPack 5.1.3) | Image → Disk → Write → Next steps |
 | My NVMe is not detected | Causes + one-click diagnostics (SSH) or bridge microSD |
 | Jetson is running → firmware & AI tuning | SSH details + steps → live log, optional reboot |

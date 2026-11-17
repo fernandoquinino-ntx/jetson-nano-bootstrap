@@ -127,3 +127,18 @@ macOS privacy protection can block raw disk access even with the administrator p
 3. Make sure no other app is using the disk (close Finder windows / Disk Utility for that disk).
 4. Still blocked? Use the terminal version: `sudo ./jetson-flasher-macos-arm64` from Terminal
    (give Terminal Full Disk Access if needed).
+
+## Boot over the network (UEFI HTTP boot) – no USB stick
+
+Wizard → **Boot the JetPack 7.2.1 installer over the network (HTTP boot)**.
+
+1. Pick / download the installer ISO.
+2. Choose this computer's IP (the wizard suggests it) and a port, then **Start server**. Copy the **Boot URL**.
+3. Jetson (Ethernet cable on the same network): press **Esc** at the NVIDIA logo → *Device Manager → Network Device
+   List →* your NIC *→ HTTP Boot Configuration* → set **Boot URI** to the Boot URL → save.
+   (No DHCP on the network? set a static address under *IPv4 Network Configuration* first.)
+4. *Boot Manager → **UEFI HTTPv4 (MAC:…)***. The ISO is downloaded into RAM and the installer starts; the wizard
+   shows the progress. Keep the wizard open until the download finishes.
+
+Notes: needs firmware 36.x; the whole ISO is loaded into RAM (8 GB module recommended); keep file names free of
+spaces; allow the firewall prompt. Equivalent by hand: `cd ~/JetsonImages && python3 -m http.server 8000`.

@@ -37,6 +37,8 @@ TASKS_ORIN = [
      "Writes NVIDIA's official image straight to the disk (recommended for most people)."),
     ("flash_iso", "Make a JetPack 7.2.1 installer USB stick",
      "Newest release. The Jetson boots from the stick and installs onto its NVMe. Needs firmware 36.x."),
+    ("http_boot", "Boot the JetPack 7.2.1 installer over the network (HTTP boot)",
+     "No USB stick: this computer serves the ISO, the Jetson boots it with UEFI “HTTPv4” over Ethernet."),
     ("bridge", "Firmware bridge: make a JetPack 5.1.3 microSD",
      "For a new Orin Nano with old firmware (UEFI shell / black screen / NVMe not seen)."),
     ("nvme_help", "My NVMe is not detected",
@@ -144,6 +146,8 @@ class App(tk.Tk):
             flow = [ImagePage(self, "image"), DiskPage(self), FlashPage(self), DonePage(self)]
         elif task == "flash_iso":
             flow = [ImagePage(self, "iso"), DiskPage(self, min_gb=16), FlashPage(self), DonePage(self)]
+        elif task == "http_boot":
+            flow = [ImagePage(self, "iso"), HttpBootPage(self)]
         elif task == "bridge":
             flow = [ImagePage(self, "bridge"), DiskPage(self, min_gb=32), FlashPage(self), DonePage(self)]
         elif task == "nvme_help":
@@ -542,6 +546,124 @@ class DonePage(Page):
         self.label(f, "Next steps", font=("", 13, "bold"))
         for i, st in enumerate(steps, 1):
             self.label(f, f"{i}. {st}")
+
+
+class HttpBootPage(Page):
+    title = "Boot the Jetson over HTTP"
+
+    def build(self, f):
+        self.server = None
+        img = Path(self.app.s["image"])
+        self.label(f, f"This computer will serve  {img.name}  ({jf.human(img.stat().st_size)}) to the Jetson. "
+                      "Connect the Jetson to the same network with an Ethernet cable (UEFI cannot use Wi-Fi).")
+        if " " in img.name:
+            self.label(f, "⚠ The file name contains spaces; rename it (no spaces) for best UEFI compatibility.",
+                       foreground="#a60")
+        row = ttk.Frame(f)
+        row.pack(anchor="w", pady=4)
+        ttk.Label(row, text="This computer's IP").pack(side="left")
+        ips = jf.lan_ips()
+        self.ip = tk.StringVar(value=ips[0])
+        ttk.Combobox(row, textvariable=self.ip, values=ips, width=18).pack(side="left", padx=6)
+        ttk.Label(row, text="Port").pack(side="left", padx=(12, 0))
+        self.port = tk.StringVar(value="8000")
+        ttk.Entry(row, textvariable=self.port, width=6).pack(side="left", padx=6)
+        self.b_start = ttk.Button(row, text="Start server", command=self.toggle)
+        self.b_start.pack(side="left", padx=12)
+
+        self.url = tk.StringVar()
+        urow = ttk.Frame(f)
+        urow.pack(fill="x", pady=4)
+        ttk.Label(urow, text="Boot URL").pack(side="left")
+        ttk.Entry(urow, textvariable=self.url, state="readonly", width=70).pack(side="left", padx=6)
+        ttk.Button(urow, text="Copy", command=self.copy).pack(side="left")
+
+        box = ttk.LabelFrame(f, text="On the Jetson", padding=8)
+        box.pack(fill="x", pady=6)
+        for t in ("1. Power on and press Esc at the NVIDIA logo to open the UEFI menu.",
+                  "2. Device Manager → Network Device List → your network card → HTTP Boot Configuration.",
+                  "3. Set “Boot URI” to the Boot URL above and save (no DHCP? set IPv4 under IPv4 Network Configuration).",
+                  "4. Back to Boot Manager → choose “UEFI HTTPv4 (MAC:…)”. The ISO downloads into RAM and the installer starts.",
+                  "Needs firmware 36.x and enough RAM for the ISO (8 GB module recommended). Menu names can vary."):
+            ttk.Label(box, text=t, wraplength=760, justify="left").pack(anchor="w")
+        self.status = tk.StringVar(value="Server stopped.")
+        ttk.Label(f, textvariable=self.status, wraplength=780).pack(anchor="w", pady=(6, 2))
+        self.bar = ttk.Progressbar(f, maximum=100)
+        self.bar.pack(fill="x")
+        self.log = tk.Text(f, height=5, state="disabled", font=("Menlo" if IS_MAC else "Consolas", 9))
+        self.log.pack(fill="both", expand=True, pady=6)
+        self.ip.trace_add("write", lambda *_: self.url_for_ip())
+        self.port.trace_add("write", lambda *_: self.url_for_ip())
+        self.url_for_ip()
+
+    def url_for_ip(self):
+        self.url.set(f"http://{self.ip.get()}:{self.port.get()}/{Path(self.app.s['image']).name}")
+
+    def copy(self):
+        self.app.clipboard_clear()
+        self.app.clipboard_append(self.url.get())
+
+    def write(self, line):
+        def f():
+            if self.log.winfo_exists():
+                self.log.config(state="normal")
+                self.log.insert("end", time.strftime("%H:%M:%S ") + line + "\n")
+                self.log.see("end")
+                self.log.config(state="disabled")
+        self.app.ui(f)
+
+    def event(self, kind, a=None, b=None, c=None):
+        if kind == "progress":
+            pct = b * 100 / max(c, 1)
+            self.app.ui(lambda: (self.bar.config(value=pct) if self.bar.winfo_exists() else None,
+                                 self.status.set(f"{a} is downloading… {jf.human(b)} / {jf.human(c)}")
+                                 if self.bar.winfo_exists() else None))
+        elif kind == "head":
+            self.write(f"{a} asked for the file size (HEAD)")
+        elif kind == "done":
+            self.write(f"{a} downloaded the complete file ✔")
+            self.app.ui(lambda: self.status.set(f"{a} finished downloading. The installer should start now."))
+        elif kind == "aborted":
+            self.write(f"{a} disconnected at {jf.human(b)}")
+        elif kind == "miss":
+            self.write(f"{a} requested a wrong path: {b}  (check the Boot URI)")
+
+    def toggle(self):
+        if self.server:
+            self.stop()
+            return
+        if not self.port.get().isdigit():
+            messagebox.showwarning("Port", "Enter a numeric port, e.g. 8000.")
+            return
+        try:
+            self.server = jf.SingleFileServer(self.app.s["image"], int(self.port.get()), self.event)
+            self.server.start()
+        except OSError as e:
+            self.server = None
+            messagebox.showerror("Cannot start server", f"{e}\n\nTry another port.")
+            return
+        self.busy = True
+        self.url_for_ip()
+        self.b_start.config(text="Stop server")
+        self.status.set(f"Serving on port {self.server.port}. Waiting for the Jetson…")
+        self.write(f"Server started: {self.url.get()}")
+        self.write("If a firewall prompt appears, allow incoming connections (private networks).")
+
+    def stop(self):
+        if self.server:
+            self.server.stop()
+            self.server = None
+        self.busy = False
+        self.b_start.config(text="Start server")
+        self.status.set("Server stopped.")
+        self.write("Server stopped.")
+
+    def leave(self):
+        self.stop()
+
+    def validate(self):
+        self.stop()
+        return True
 
 
 class NvmeHelpPage(Page):
