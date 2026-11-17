@@ -48,7 +48,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # --------------------------------------------------------------------------
 # Catalog of official images. Edit here if NVIDIA publishes a new image.
@@ -604,6 +604,31 @@ do_info(){
   fi
 }
 
+do_nvme(){
+  step "NVMe diagnostics"
+  apt-get install -y pciutils nvme-cli >/dev/null 2>&1 || wrn "Could not install pciutils/nvme-cli (no network?)"
+  modprobe nvme 2>/dev/null || true
+  echo "-- PCIe devices (the NVMe must appear as 'Non-Volatile memory controller'):"
+  lspci 2>/dev/null || echo "   lspci unavailable"
+  echo "-- Block devices:"; lsblk -o NAME,SIZE,TYPE,MODEL,MOUNTPOINT 2>/dev/null
+  echo "-- nvme list:"; nvme list 2>/dev/null || true
+  echo "-- Kernel messages (nvme/pcie):"
+  dmesg 2>/dev/null | grep -i -E "nvme|pcie.*(link|fail|timeout)|tegra194-pcie" | tail -n 25
+  echo "-- nvme driver: $(lsmod | grep -c '^nvme') module(s) loaded; kernel config: $(zcat /proc/config.gz 2>/dev/null | grep 'CONFIG_BLK_DEV_NVME=' || echo 'n/a')"
+  FW=$(nvbootctrl dump-slots-info 2>/dev/null | awk -F': ' '/Current version/{print $2}')
+  echo "-- Firmware: ${FW:-unknown}   L4T: ${L4T:-unknown}"
+  if ls /dev/nvme0n1 >/dev/null 2>&1; then
+    okk "NVMe detected: /dev/nvme0n1. The kernel driver is fine."
+    [[ "${FW:-0}" =~ ^3[0-5]\. ]] && wrn "Firmware ${FW} is older than 36.x: update it (--firmware) or JetPack 6/7 installers will not boot."
+  else
+    wrn "No NVMe device. The driver is built into the Jetson kernel, so this is almost always:"
+    echo "   1. SSD not fully seated / screw missing in the M.2 Key-M slot (bottom of the carrier board)"
+    echo "   2. SSD is SATA M.2 (B-key) - only PCIe NVMe works"
+    echo "   3. Old QSPI firmware - run the firmware step (--firmware), power off completely, retry"
+    echo "   4. Try another NVMe (some drives with power-saving/PCIe Gen4 quirks fail to link)"
+  fi
+}
+
 do_firmware(){
   step "Firmware / QSPI bootloader"
   FW=$(nvbootctrl dump-slots-info 2>/dev/null | awk -F': ' '/Current version/{print $2}')
@@ -746,6 +771,7 @@ for a in "$@"; do
   case $a in
     --info) do_info ;;
     --firmware) do_firmware ;;
+    --nvme) do_nvme ;;
     --upgrade) do_upgrade ;;
     --jetpack) do_jetpack ;;
     --resize) do_resize ;;
@@ -764,6 +790,7 @@ if [[ $REBOOT_NEEDED == 1 ]]; then wrn "A reboot is required: sudo reboot"; fi
 
 REMOTE_STEPS = [
     ("--info",     "Show system / firmware info", True),
+    ("--nvme",     "NVMe diagnostics (is the SSD seen? driver, PCIe, firmware hints)", True),
     ("--firmware", "Update firmware / QSPI bootloader", True),
     ("--upgrade",  "APT full upgrade (JetPack 6 only: optionally move repo to 36.5 = JetPack 6.2.3)", True),
     ("--jetpack",  "Install full JetPack SDK (CUDA, cuDNN, TensorRT) + CUDA PATH", True),
@@ -777,7 +804,27 @@ REMOTE_STEPS = [
 ]
 
 
-def remote_menu():
+def flow_nvme_help():
+    header("NVMe not detected by the Jetson / installer")
+    print("  The NVMe driver is already inside NVIDIA's Linux kernel - there is nothing to install on the")
+    print("  USB stick. When the installer lists no NVMe the cause is one of:")
+    print("   1. SSD not seated / not screwed down in the M.2 Key-M slot under the carrier board.")
+    print("   2. SSD is not PCIe NVMe (M.2 SATA drives are not supported).")
+    print("   3. Firmware (QSPI) older than 36.x - the usual cause on a new Orin Nano.")
+    print("   4. A drive that fails PCIe link training - try a different NVMe.")
+    print()
+    print("  Safe order of attack:")
+    print("   a) Power off, re-seat the SSD, boot the installer again.")
+    print("   b) Still missing? Make the JetPack 5.1.3 microSD (menu 6), boot it, run this menu's SSH")
+    print("      diagnostics (it also updates firmware to 36.x), then retry the JetPack 7.2.x USB stick.")
+    print()
+    if yes("Run NVMe diagnostics + firmware update on a booted Jetson over SSH now?"):
+        remote_menu(preset=["--info", "--nvme", "--firmware"])
+    elif yes("Prepare the JetPack 5.1.3 firmware-bridge microSD now?"):
+        flow_bridge()
+
+
+def remote_menu(preset=None):
     header("Firmware update & AI tuning on the Jetson (via SSH)")
     print("  The Jetson must be booted, on your network, with SSH enabled")
     print("  (finish the first-boot setup on a monitor, or over the USB-C port: 192.168.55.1).")
@@ -788,8 +835,10 @@ def remote_menu():
     print("\n  Select steps (enter numbers separated by spaces, Enter = defaults marked *):")
     for i, (_, label, default) in enumerate(REMOTE_STEPS, 1):
         print(f"   {'*' if default else ' '} {i:2}) {label}")
-    sel = ask("Steps").split()
-    if sel:
+    sel = [] if preset else ask("Steps").split()
+    if preset:
+        chosen = preset
+    elif sel:
         chosen = [REMOTE_STEPS[int(s) - 1][0] for s in sel if s.isdigit() and 1 <= int(s) <= len(REMOTE_STEPS)]
     else:
         chosen = [flag for flag, _, d in REMOTE_STEPS if d]
@@ -858,6 +907,7 @@ def flow_flash(board: str):
             print("  3. Press Esc at the NVIDIA logo → Boot Manager → choose the USB stick.")
             print("  4. In the installer, pick the NVMe as the target. Remove the stick after it finishes.")
             print("  5. Then use menu 7 to tune for AI.")
+            print("  No NVMe in the installer? -> menu 8 (diagnose + firmware).")
         return
 
     image = choose_image(board)
@@ -872,7 +922,7 @@ def flow_flash(board: str):
             print("  1. Install the NVMe in the M.2 Key-M slot on the bottom of the carrier board")
             print("     (remove the microSD card so the Jetson boots from NVMe).")
         print("  2. Power on with monitor+keyboard, finish the Ubuntu first-boot setup.")
-        print("  3. If you land in a UEFI shell / black screen, the firmware is too old:")
+        print("  3. NVMe not seen or UEFI shell / black screen? Firmware is too old (menu 8 / 6):")
         print("     use menu option 6 (firmware bridge).")
         print("  4. Then use menu option 7 to update firmware and tune for AI.")
 
@@ -934,6 +984,7 @@ def main():
         print("  5) Change board")
         if board == "orin":
             print("  6) Firmware bridge: prepare JetPack 5.1.3 microSD (old firmware)")
+            print("  8) NVMe not detected? Diagnose + firmware fix")
         print("  7) Jetson is booted → update firmware & tune for AI (SSH)")
         print("  q) Quit")
         sel = ask("Choice")
@@ -952,6 +1003,8 @@ def main():
                 flow_bridge()
             elif sel == "7":
                 remote_menu()
+            elif sel == "8" and board == "orin":
+                flow_nvme_help()
             elif sel.lower() in ("q", "quit", "exit"):
                 break
         except subprocess.CalledProcessError as e:

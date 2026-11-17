@@ -23,6 +23,7 @@ Run: `python3 jetson_flasher.py` or `./jetson-flasher-macos-arm64` (or `-x64`). 
 | **4 Flash JetPack** | Download/choose file → pick disk → confirm → write → optional verify → eject. See below. |
 | **5 Change board** | Switch Orin Nano / Nano. |
 | **6 Firmware bridge** | Orin only. Prepares a JetPack 5.1.3 microSD to upgrade old firmware. |
+| **8 NVMe not detected?** | Orin only. Explains causes and runs NVMe diagnostics + firmware update over SSH (or prepares the bridge microSD). |
 | **7 Post-boot tuning** | SSH into the booted Jetson to update firmware and optimise it for AI. |
 
 ### Menu 4 – flashing (Orin Nano)
@@ -57,6 +58,7 @@ over `ssh -t`. Pick steps by number (Enter = the starred defaults):
 
 | # | Step | Effect |
 |---|---|---|
+| 0* | NVMe diagnostics | `lspci`, `lsblk`, `nvme list`, kernel log, driver state, firmware hints |
 | 1* | Info | Model, L4T, kernel, boot device, disk/RAM/swap, power mode, firmware slots |
 | 2* | Firmware | L4T 35.x: installs QSPI updater (→ 36.x); 36+/39: upgrades the bootloader package |
 | 3* | Upgrade | `apt dist-upgrade`; JetPack 6 can retarget the apt repo (e.g. `36.5`) |
@@ -70,6 +72,19 @@ over `ssh -t`. Pick steps by number (Enter = the starred defaults):
 | 11 | Ollama | Local LLM server |
 
 (* = default.) A reboot reminder is printed when needed, and the tool offers to reboot the Jetson.
+
+## The installer does not see the NVMe
+
+You cannot add an NVMe "driver" to the USB stick/SD: support is built into NVIDIA's kernel. Work through:
+
+1. **Seating** – power off, unplug, re-seat the SSD in the M.2 **Key-M** slot (bottom of the carrier board) and screw it down.
+2. **Drive type** – must be PCIe NVMe (2230/2242/2280 per carrier); M.2 SATA does not work.
+3. **Firmware** – a new unit has old QSPI firmware. Run menu **8** (or **6**): boot the JetPack 5.1.3 microSD, run the
+   diagnostics + firmware step, power off completely, then retry the JetPack 7.2.x USB stick (needs firmware 36.x).
+4. **Other drive** – a few SSDs fail PCIe link training; try another.
+
+Menu 8 → SSH prints a report; if `lspci` shows no "Non-Volatile memory controller" it is hardware (1/2/4),
+otherwise firmware/software (3). On the Jetson itself you can run: `lspci; lsblk; sudo dmesg | grep -i nvme`.
 
 ## Windows
 

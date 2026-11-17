@@ -3,6 +3,15 @@
 All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [1.2.0] - 2026-11-17
+
+### Added
+- Menu 8 "NVMe not detected? Diagnose + firmware fix": explains the real causes (the NVMe driver is already in
+  NVIDIA's kernel, so the usual culprits are seating, non-NVMe M.2 SATA drive, or old QSPI firmware) and
+  chains into the firmware-bridge microSD or the SSH diagnostics.
+- New SSH step `--nvme` (PCIe/lspci, lsblk, nvme list, dmesg, driver state, firmware hints).
+- Post-flash hints now point to menu 8 when the NVMe is not seen.
+
 ## [1.1.0] - 2026-11-17
 
 ### Added
