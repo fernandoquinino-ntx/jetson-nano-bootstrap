@@ -9,6 +9,11 @@ on:
     tags: ["v*.*.*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Create a GitHub Release (tag vX.Y.Z from jetson_flasher.py __version__)"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -64,7 +69,7 @@ jobs:
           retention-days: 30
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -72,10 +77,18 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with: { path: dist, merge-multiple: true }
+      - uses: actions/checkout@v4
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
-            --title "Jetson Flasher $GITHUB_REF_NAME" \
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            TAG="v$(sed -n 's/^__version__ = "\(.*\)"/\1/p' jetson_flasher.py)"
+          fi
+          echo "Releasing $TAG at $GITHUB_SHA"
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Jetson Flasher $TAG" \
             --notes "See CHANGELOG.md. Binaries are unsigned: see the README (Gatekeeper / SmartScreen)."
