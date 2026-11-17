@@ -12,14 +12,17 @@ An interactive, dependency-free (Python standard library only) tool that takes a
 
 ## Download
 
-Binaries are built by GitHub Actions on every push ([workflow runs](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/actions/workflows/build.yml), artifacts kept 30 days) and attached to every tagged
-[Release](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases/latest).
+Direct download links (always the newest tagged release):
 
-| Platform | Download |
-|---|---|
-| macOS Apple Silicon – full features | `jetson-flasher-macos-arm64` from [Releases](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases/latest) |
-| macOS Intel – full features | `jetson-flasher-macos-x64` from [Releases](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases/latest) |
-| Windows x64 – download + SSH tuning only | `jetson-flasher-windows-x64.exe` from [Releases](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases/latest) |
+| Platform | Binary | Checksum |
+|---|---|---|
+| macOS Apple Silicon (M1/M2/M3/M4) – full features | [jetson-flasher-macos-arm64](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases/latest/download/jetson-flasher-macos-arm64) | [SHA-256](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases/latest/download/jetson-flasher-macos-arm64.sha256) |
+| macOS Intel – full features | [jetson-flasher-macos-x64](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases/latest/download/jetson-flasher-macos-x64) | [SHA-256](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases/latest/download/jetson-flasher-macos-x64.sha256) |
+| Windows x64 – download + SSH tuning only | [jetson-flasher-windows-x64.exe](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases/latest/download/jetson-flasher-windows-x64.exe) | [SHA-256](https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases/latest/download/jetson-flasher-windows-x64.exe.sha256) |
+
+- All releases: <https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/releases>
+- Latest CI builds (artifacts kept 30 days, need a GitHub login): <https://github.com/fernandoquinino-ntx/jetson-nano-bootstrap/actions/workflows/build.yml>
+- Source script: [jetson_flasher.py](jetson_flasher.py) · Usage guide: [docs/USAGE.md](docs/USAGE.md) · [CHANGELOG.md](CHANGELOG.md)
 
 Or run the script directly: `python3 jetson_flasher.py` (Python 3.9+, no pip packages).
 
