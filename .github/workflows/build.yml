@@ -35,8 +35,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14,       name: jetson-flasher-macos-arm64,  ext: "" }
-          - { os: macos-13,       name: jetson-flasher-macos-x64,    ext: "" }
+          - { os: macos-15,       name: jetson-flasher-macos-arm64,  ext: "" }
+          - { os: macos-15-intel, name: jetson-flasher-macos-x64,    ext: "" }
           - { os: windows-latest, name: jetson-flasher-windows-x64,  ext: ".exe" }
     runs-on: ${{ matrix.os }}
     steps:
