@@ -33,6 +33,7 @@ IMPORTANT
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import plistlib
 import random
@@ -40,6 +41,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -48,7 +50,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-__version__ = "1.2.0"
+__version__ = "2.0.0"
 
 # --------------------------------------------------------------------------
 # Catalog of official images. Edit here if NVIDIA publishes a new image.
@@ -64,7 +66,7 @@ CATALOG = {
             "l4t": "36.4.4",
             "url": "https://developer.nvidia.com/downloads/embedded/L4T/r36_Release_v4.4/jp62-r1-orin-nano-sd-card-image.zip",
             "note": "Latest SD-card image. Newer 6.2.x releases (e.g. 6.2.3 / L4T 36.5.x) "
-                    "are installed on top of it with an APT upgrade (menu option 7).",
+                    "are installed on top of it with an APT upgrade (SSH tuning step).",
         },
         "iso": {
             "jetpack": "7.2.1",
@@ -107,7 +109,7 @@ UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X) jetson-flasher/1.0"
 # Small terminal UI helpers
 # --------------------------------------------------------------------------
 
-USE_COLOR = sys.stdout.isatty()
+USE_COLOR = bool(sys.stdout and sys.stdout.isatty())
 if USE_COLOR and sys.platform == "win32":
     os.system("")  # enables ANSI escape processing in the Windows console
 
@@ -390,7 +392,8 @@ def check_latest(board: str):
 # Download
 # --------------------------------------------------------------------------
 
-def download(url: str, dest_dir: Path = CACHE_DIR) -> Path | None:
+def download(url: str, dest_dir: Path = CACHE_DIR, on_progress=None) -> Path | None:
+    """on_progress(done, total) replaces the terminal bar (used by the GUI)."""
     dest_dir.mkdir(parents=True, exist_ok=True)
     # Resolve redirects to learn the real filename and size
     try:
@@ -423,13 +426,19 @@ def download(url: str, dest_dir: Path = CACHE_DIR) -> Path | None:
                 have = 0
             mode = "ab" if have else "wb"
             length = int(r.headers.get("Content-Length") or 0)
-            prog = Progress(have + length if length else total, "Download")
+            grand = have + length if length else total
+            prog = Progress(grand, "Download")
             prog.done = have
             with open(part, mode) as f:
                 while chunk := r.read(1 << 20):
                     f.write(chunk)
-                    prog.update(len(chunk))
-            prog.finish()
+                    if on_progress:
+                        prog.done += len(chunk)
+                        on_progress(prog.done, grand)
+                    else:
+                        prog.update(len(chunk))
+            if not on_progress:
+                prog.finish()
     except (urllib.error.URLError, OSError) as e:
         err(f"Download failed: {e}. Run again to resume.")
         return None
@@ -870,6 +879,137 @@ def remote_menu(preset=None):
 
 
 # --------------------------------------------------------------------------
+# Privileged flash worker (used by the GUI; runs as root via the OS admin prompt)
+# --------------------------------------------------------------------------
+
+def _status(path: str, **kw):
+    with open(path, "a") as f:
+        f.write(json.dumps(kw) + "\n")
+
+
+def worker_flash(image: str, ident: str, status: str, do_verify: bool) -> int:
+    """Write `image` to /dev/r<ident>, report JSON lines to `status`. Needs root."""
+    cancel = status + ".cancel"
+    try:
+        if sys.platform != "darwin" or os.geteuid() != 0:
+            raise RuntimeError("The flash worker must run as root on macOS.")
+        if not re.fullmatch(r"disk\d+", ident):
+            raise RuntimeError(f"Invalid disk id: {ident}")
+        allowed = {d.ident: d for d in list_external_disks()}
+        if ident not in allowed or ident in boot_disks():
+            raise RuntimeError(f"{ident} is not an external disk (refusing to write).")
+        disk = allowed[ident]
+        src, size = open_image_stream(Path(image))
+        if size > disk.size:
+            raise RuntimeError(f"Image ({human(size)}) is larger than the disk ({human(disk.size)}).")
+        run(["diskutil", "unmountDisk", "force", ident], check=False)
+        blk, sector = 4 << 20, 4096
+        h, done, last = hashlib.sha256(), 0, 0.0
+        with open(disk.raw, "wb", buffering=0) as dev:
+            while chunk := src.read(blk):
+                if os.path.exists(cancel):
+                    raise RuntimeError("Cancelled. The disk is left partially written.")
+                h.update(chunk)
+                done += len(chunk)
+                if len(chunk) % sector:
+                    chunk += b"\0" * (sector - len(chunk) % sector)
+                mv = memoryview(chunk)
+                while mv:
+                    mv = mv[dev.write(mv):]
+                if time.time() - last > 0.3:
+                    last = time.time()
+                    _status(status, phase="write", done=done, total=size)
+            try:
+                os.fsync(dev.fileno())
+            except OSError:
+                pass
+        src.close()
+        _status(status, phase="write", done=size, total=size)
+        if do_verify:
+            hv, got, last = hashlib.sha256(), 0, 0.0
+            with open(disk.raw, "rb", buffering=0) as dev:
+                while got < size:
+                    if os.path.exists(cancel):
+                        raise RuntimeError("Verification cancelled.")
+                    want = min(blk, size - got)
+                    data = dev.read(((want + sector - 1) // sector) * sector)[:want]
+                    if not data:
+                        break
+                    hv.update(data)
+                    got += len(data)
+                    if time.time() - last > 0.3:
+                        last = time.time()
+                        _status(status, phase="verify", done=got, total=size)
+            if hv.hexdigest() != h.hexdigest():
+                raise RuntimeError("Verification FAILED: the disk content differs from the image. "
+                                   "Try another cable / enclosure / USB port and flash again.")
+        run(["diskutil", "eject", ident], check=False)
+        _status(status, phase="done", sha256=h.hexdigest(), verified=do_verify)
+        return 0
+    except Exception as e:  # noqa: BLE001
+        _status(status, phase="error", msg=str(e))
+        return 1
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _ssh_env(password: str):
+    """Environment that lets ssh/scp read the password without a terminal (SSH_ASKPASS)."""
+    env, tmp = dict(os.environ), None
+    if password:
+        tmp = Path(tempfile.mkdtemp(prefix="jfask"))
+        if sys.platform == "win32":
+            ap = tmp / "askpass.bat"
+            ap.write_text("@echo off\r\necho %JF_PW%\r\n")
+        else:
+            ap = tmp / "askpass.sh"
+            ap.write_text('#!/bin/sh\nprintf "%s\\n" "$JF_PW"\n')
+            ap.chmod(0o700)
+        env.update(SSH_ASKPASS=str(ap), SSH_ASKPASS_REQUIRE="force",
+                   JF_PW=password, DISPLAY=env.get("DISPLAY", ":0"))
+    return env, tmp
+
+
+SSH_OPTS = ["-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15",
+            "-o", "NumberOfPasswordPrompts=1"]
+
+
+def run_remote(host: str, user: str, password: str, steps: list, extra_env: list,
+               log, reboot: bool = False) -> int:
+    """Copy jetson_postinstall.sh to the Jetson and run it with sudo, streaming output to log()."""
+    target = f"{user}@{host}"
+    env, tmp = _ssh_env(password)
+    try:
+        script = Path(tempfile.gettempdir()) / "jetson_postinstall.sh"
+        with open(script, "w", newline="\n") as fh:
+            fh.write(REMOTE_SCRIPT)
+        if not reboot:
+            log(f"Copying script to {target} ...")
+            r = subprocess.run(["scp", *SSH_OPTS, str(script), f"{target}:~/jetson_postinstall.sh"],
+                               env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+            if r.returncode != 0:
+                log("scp failed: " + (r.stderr or r.stdout).strip())
+                return r.returncode
+            remote = ("sudo -S -p '' env " + " ".join(extra_env) +
+                      " bash ~/jetson_postinstall.sh " + " ".join(steps))
+        else:
+            remote = "sudo -S -p '' reboot"
+        log(f"Running on the Jetson: {' '.join(steps) if not reboot else 'reboot'}")
+        pr = subprocess.Popen(["ssh", *SSH_OPTS, target, remote], env=env,
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True, bufsize=1)
+        pr.stdin.write(password + "\n")
+        pr.stdin.close()
+        for line in pr.stdout:
+            log(ANSI_RE.sub("", line.rstrip("\n")))
+        return pr.wait()
+    finally:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
 # Guided flows
 # --------------------------------------------------------------------------
 
@@ -960,6 +1100,8 @@ def main():
     if "--version" in sys.argv[1:]:
         print(f"jetson-flasher {__version__}")
         return
+    if len(sys.argv) >= 6 and sys.argv[1] == "--worker-flash":
+        sys.exit(worker_flash(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5] == "1"))
     needed = ("diskutil", "dd", "ssh", "scp") if sys.platform == "darwin" else ("ssh", "scp")
     if sys.platform != "darwin":
         warn("Not running on macOS: disk flashing is disabled; download and SSH tuning still work.")
