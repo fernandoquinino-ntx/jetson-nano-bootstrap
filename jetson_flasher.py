@@ -50,7 +50,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 
 # --------------------------------------------------------------------------
 # Catalog of official images. Edit here if NVIDIA publishes a new image.
@@ -887,6 +887,71 @@ def _status(path: str, **kw):
         f.write(json.dumps(kw) + "\n")
 
 
+class _RawWriter:
+    """Raw-disk writer. If macOS refuses open() (EPERM), fall back to Apple's /bin/dd."""
+
+    def __init__(self, path: str):
+        self.proc, self.f = None, None
+        try:
+            self.f = open(path, "wb", buffering=0)
+        except PermissionError:
+            self.proc = subprocess.Popen(["/bin/dd", f"of={path}", "bs=4m"],
+                                         stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def _fail(self):
+        err = self.proc.stderr.read().decode(errors="ignore").strip() if self.proc.stderr else ""
+        self.proc.wait()
+        raise PermissionError(1, err or "Operation not permitted")
+
+    def write(self, mv):
+        if self.f:
+            while mv:
+                mv = mv[self.f.write(mv):]
+            return
+        try:
+            self.proc.stdin.write(bytes(mv))
+        except (BrokenPipeError, OSError):
+            self._fail()
+
+    def close(self):
+        if self.f:
+            try:
+                os.fsync(self.f.fileno())
+            except OSError:
+                pass
+            self.f.close()
+        else:
+            try:
+                self.proc.stdin.close()
+            except OSError:
+                pass
+            if self.proc.wait() != 0:
+                self._fail()
+
+
+class _RawReader:
+    def __init__(self, path: str, size: int, blk: int):
+        self.proc, self.f = None, None
+        try:
+            self.f = open(path, "rb", buffering=0)
+        except PermissionError:
+            count = (size + blk - 1) // blk
+            self.proc = subprocess.Popen(["/bin/dd", f"if={path}", "bs=4m", f"count={count}"],
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.f = self.proc.stdout
+
+    def read(self, n):
+        data = self.f.read(n)
+        if not data and self.proc:
+            err = self.proc.stderr.read().decode(errors="ignore")
+            if "not permitted" in err:
+                raise PermissionError(1, err.strip())
+        return data
+
+    def close(self):
+        self.f.close()
+
+
 def worker_flash(image: str, ident: str, status: str, do_verify: bool) -> int:
     """Write `image` to /dev/r<ident>, report JSON lines to `status`. Needs root."""
     cancel = status + ".cancel"
@@ -905,7 +970,8 @@ def worker_flash(image: str, ident: str, status: str, do_verify: bool) -> int:
         run(["diskutil", "unmountDisk", "force", ident], check=False)
         blk, sector = 4 << 20, 4096
         h, done, last = hashlib.sha256(), 0, 0.0
-        with open(disk.raw, "wb", buffering=0) as dev:
+        dev = _RawWriter(disk.raw)
+        try:
             while chunk := src.read(blk):
                 if os.path.exists(cancel):
                     raise RuntimeError("Cancelled. The disk is left partially written.")
@@ -913,21 +979,18 @@ def worker_flash(image: str, ident: str, status: str, do_verify: bool) -> int:
                 done += len(chunk)
                 if len(chunk) % sector:
                     chunk += b"\0" * (sector - len(chunk) % sector)
-                mv = memoryview(chunk)
-                while mv:
-                    mv = mv[dev.write(mv):]
+                dev.write(memoryview(chunk))
                 if time.time() - last > 0.3:
                     last = time.time()
                     _status(status, phase="write", done=done, total=size)
-            try:
-                os.fsync(dev.fileno())
-            except OSError:
-                pass
+        finally:
+            dev.close()
         src.close()
         _status(status, phase="write", done=size, total=size)
         if do_verify:
             hv, got, last = hashlib.sha256(), 0, 0.0
-            with open(disk.raw, "rb", buffering=0) as dev:
+            dev = _RawReader(disk.raw, size, blk)
+            try:
                 while got < size:
                     if os.path.exists(cancel):
                         raise RuntimeError("Verification cancelled.")
@@ -940,6 +1003,8 @@ def worker_flash(image: str, ident: str, status: str, do_verify: bool) -> int:
                     if time.time() - last > 0.3:
                         last = time.time()
                         _status(status, phase="verify", done=got, total=size)
+            finally:
+                dev.close()
             if hv.hexdigest() != h.hexdigest():
                 raise RuntimeError("Verification FAILED: the disk content differs from the image. "
                                    "Try another cable / enclosure / USB port and flash again.")
@@ -947,7 +1012,8 @@ def worker_flash(image: str, ident: str, status: str, do_verify: bool) -> int:
         _status(status, phase="done", sha256=h.hexdigest(), verified=do_verify)
         return 0
     except Exception as e:  # noqa: BLE001
-        _status(status, phase="error", msg=str(e))
+        _status(status, phase="error", msg=str(e),
+                code="eperm" if isinstance(e, PermissionError) else "")
         return 1
 
 

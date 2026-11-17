@@ -416,10 +416,22 @@ class FlashPage(Page):
         ttk.Label(f, textvariable=self.status, wraplength=740).pack(anchor="w", pady=6)
         self.bar = ttk.Progressbar(f, maximum=100)
         self.bar.pack(fill="x", pady=6)
-        self.b_cancel = ttk.Button(f, text="Cancel", command=self.cancel)
-        self.b_cancel.pack(anchor="w")
-        self.busy = True
+        row = ttk.Frame(f)
+        row.pack(anchor="w")
+        self.b_cancel = ttk.Button(row, text="Cancel", command=self.cancel)
+        self.b_cancel.pack(side="left")
+        self.b_retry = ttk.Button(row, text="Try again", command=self.start)
+        self.b_retry.pack(side="left", padx=8)
+        self.b_retry.state(["disabled"])
         self.ok = False
+        self.start()
+
+    def start(self):
+        self.busy = True
+        self.b_retry.state(["disabled"])
+        self.b_cancel.state(["!disabled"])
+        self.bar.config(value=0)
+        self.status.set("Waiting for administrator approval…")
         self.app.b_next.state(["disabled"])
         self.app.b_back.state(["disabled"])
         threading.Thread(target=self.run_worker, daemon=True).start()
@@ -484,7 +496,18 @@ class FlashPage(Page):
             if "User canceled" in msg or "-128" in msg:
                 msg = "Administrator approval was cancelled."
             self.status.set("✖ " + msg)
-            messagebox.showerror("Flash failed", msg)
+            self.b_retry.state(["!disabled"])
+            if (final or {}).get("code") == "eperm" or "not permitted" in msg.lower():
+                if messagebox.askyesno(
+                        "macOS blocked access to the disk",
+                        f"{msg}\n\nmacOS privacy protection is blocking raw disk access for this app.\n\n"
+                        "Fix: System Settings → Privacy & Security → Full Disk Access → turn ON “Jetson Flasher” "
+                        "(use + to add it from Applications if it is missing), quit and reopen the app, "
+                        "and try again.\n\nOpen that settings page now?"):
+                    subprocess.run(["open", "x-apple.systempreferences:com.apple.preference.security?"
+                                            "Privacy_AllFiles"], check=False)
+            else:
+                messagebox.showerror("Flash failed", msg)
 
     def validate(self):
         return (not IS_MAC) or self.ok

@@ -116,3 +116,14 @@ macOS-only; on Windows write the downloaded image with balenaEtcher or Rufus.
 
 NVIDIA publishes new images: edit the `CATALOG` dictionary at the top of `jetson_flasher.py`, bump `__version__`,
 add a CHANGELOG entry and tag a release.
+
+## macOS: "Operation not permitted" on /dev/rdiskN
+
+macOS privacy protection can block raw disk access even with the administrator password. Fix:
+
+1. *System Settings → Privacy & Security → **Full Disk Access*** → enable **Jetson Flasher**
+   (press **+** and pick it from Applications if it is not listed).
+2. Quit and reopen the app, then press **Try again** (or run the wizard again).
+3. Make sure no other app is using the disk (close Finder windows / Disk Utility for that disk).
+4. Still blocked? Use the terminal version: `sudo ./jetson-flasher-macos-arm64` from Terminal
+   (give Terminal Full Disk Access if needed).

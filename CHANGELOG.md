@@ -3,6 +3,14 @@
 All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [2.0.1] - 2026-11-17
+
+### Fixed
+- `[Errno 1] Operation not permitted: '/dev/rdiskN'` when flashing from the macOS app: the helper now falls back to
+  Apple's `/bin/dd` if opening the raw disk is refused, for both writing and verifying.
+- If macOS still blocks access (privacy / TCC), the wizard explains the fix, opens
+  *Privacy & Security → Full Disk Access*, and offers a **Try again** button.
+
 ## [2.0.0] - 2026-11-17
 
 ### Added
